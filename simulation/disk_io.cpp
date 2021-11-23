@@ -31,6 +31,7 @@ POSSIBILITY OF SUCH DAMAGE.
 */
 
 #include "disk_io.hpp"
+#include "utils.hpp"
 #include "libtorrent/torrent_info.hpp"
 #include "libtorrent/io_context.hpp"
 #include "libtorrent/add_torrent_params.hpp"
@@ -38,6 +39,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/deadline_timer.hpp"
 #include "libtorrent/disk_observer.hpp"
 #include "libtorrent/aux_/apply_pad_files.hpp"
+#include "libtorrent/random.hpp"
 
 #include <utility> // for exchange()
 
@@ -78,11 +80,13 @@ lt::sha1_hash generate_hash1(lt::piece_index_t const p, lt::file_storage const& 
 		for (int i = 0; i < lt::default_block_size;)
 		{
 			int const bytes = std::min(int(fill.size()), payload_size - offset);
+			if (bytes <= 0) break;
 			ret.update(fill.data(), bytes);
 			offset += bytes;
 			i += bytes;
 		}
 	}
+	TORRENT_ASSERT(piece_size - offset == pad_bytes);
 	std::array<char, 8> const pad{{0, 0, 0, 0, 0, 0, 0, 0}};
 	while (offset < piece_size)
 	{
@@ -133,7 +137,6 @@ lt::sha1_hash generate_hash2(lt::piece_index_t p, lt::file_storage const& fs
 			std::vector<char> padding(piece_size - offset, 0);
 			ret.update(padding);
 		}
-
 		if (v2)
 			hashes[block] = v2_hash.final();
 	}
@@ -142,6 +145,8 @@ lt::sha1_hash generate_hash2(lt::piece_index_t p, lt::file_storage const& fs
 
 lt::sha256_hash generate_block_hash(lt::piece_index_t p, int const offset)
 {
+	// TODO: this function is not correct for files whose size are not divisible
+	// by the block size (for the last block)
 	lt::hasher256 ret;
 	int const block = offset / lt::default_block_size;
 	auto const fill = generate_block_fill(p, block);
@@ -196,12 +201,27 @@ int pads_in_req(std::unordered_map<lt::piece_index_t, int> const& pb
 }
 
 std::shared_ptr<lt::torrent_info> create_test_torrent(int const piece_size
-	, int const num_pieces, lt::create_flags_t const flags)
+	, int const num_pieces, lt::create_flags_t const flags, int const num_files)
 {
-	lt::file_storage fs;
-	int const total_size = piece_size * num_pieces;
-	fs.add_file("file-1", total_size);
-	lt::create_torrent t(fs, piece_size, flags);
+	lt::file_storage ifs;
+	int total_size = num_files * piece_size * num_pieces + 1234;
+	if (num_files == 1)
+	{
+		ifs.add_file("file-1", total_size);
+	}
+	else
+	{
+		int const file_size = total_size / num_files + 10;
+		for (int i = 0; i < num_files; ++i)
+		{
+			int const this_size = std::min(file_size, total_size);
+			ifs.add_file("test-torrent/file-" + std::to_string(i + 1), this_size);
+			total_size -= this_size;
+		}
+	}
+	lt::create_torrent t(ifs, piece_size, flags);
+
+	lt::file_storage const& fs = t.files();
 
 	auto const pad_bytes = compute_pad_bytes(fs);
 
@@ -212,21 +232,35 @@ std::shared_ptr<lt::torrent_info> create_test_torrent(int const piece_size
 	}
 	else
 	{
-		int const blocks_in_piece = piece_size / lt::default_block_size;
-		TORRENT_ASSERT(blocks_in_piece * lt::default_block_size == piece_size);
+		int const blocks_per_piece = piece_size / lt::default_block_size;
+		TORRENT_ASSERT(blocks_per_piece * lt::default_block_size == piece_size);
+		// blocks per piece must be a power of two
+		TORRENT_ASSERT((blocks_per_piece & (blocks_per_piece - 1)) == 0);
 
-		int const num_leafs = lt::merkle_num_leafs(blocks_in_piece);
-		lt::aux::vector<lt::sha256_hash> v2tree(lt::merkle_num_nodes(num_leafs));
-		auto const blocks = lt::span<lt::sha256_hash>(v2tree).subspan(lt::merkle_first_leaf(num_leafs));
+		lt::aux::vector<lt::sha256_hash> blocks(blocks_per_piece);
+		std::vector<lt::sha256_hash> scratch_space;
 
-		for (auto const i : fs.piece_range())
+		for (auto const f : fs.file_range())
 		{
-			auto const hash = generate_hash2(i, fs, blocks, pads_in_piece(pad_bytes, i));
-			lt::merkle_fill_tree(v2tree, num_leafs);
-			t.set_hash2(lt::file_index_t{0}, i - 0_piece, v2tree[0]);
+			if (fs.pad_file_at(f)) continue;
+			auto const file_piece = fs.piece_index_at_file(f);
+			for (auto const p : fs.file_piece_range(f))
+			{
+				auto const piece = file_piece + p;
+				auto const blocks_in_piece = fs.blocks_in_piece2(piece);
+				TORRENT_ASSERT(blocks_in_piece > 0);
+				TORRENT_ASSERT(blocks_in_piece <= int(blocks.size()));
+				auto const hash = generate_hash2(piece, fs, blocks, pads_in_piece(pad_bytes, piece));
+				auto const piece_layer_hash = lt::merkle_root_scratch(
+					lt::span<lt::sha256_hash const>(blocks).first(blocks_in_piece)
+					, blocks_per_piece
+					, {}
+					, scratch_space);
+				t.set_hash2(f, p, piece_layer_hash);
 
-			if (!(flags & lt::create_torrent::v2_only))
-				t.set_hash(i, hash);
+				if (!(flags & lt::create_torrent::v2_only))
+					t.set_hash(file_piece + p, hash);
+			}
 		}
 	}
 
@@ -239,10 +273,11 @@ std::shared_ptr<lt::torrent_info> create_test_torrent(int const piece_size
 }
 
 lt::add_torrent_params create_test_torrent(
-	int const num_pieces, lt::create_flags_t const flags)
+	int const num_pieces, lt::create_flags_t const flags, int const blocks_per_piece
+	, int const num_files)
 {
 	lt::add_torrent_params params;
-	params.ti = ::create_test_torrent(lt::default_block_size * 2, num_pieces, flags);
+	params.ti = ::create_test_torrent(lt::default_block_size * blocks_per_piece, num_pieces, flags, num_files);
 	// this is unused by the test disk I/O
 	params.save_path = ".";
 	return params;
@@ -277,8 +312,15 @@ struct test_disk_io final : lt::disk_interface
 		lt::file_storage const& fs = params.files;
 		m_files = &fs;
 		m_blocks_per_piece = fs.piece_length() / lt::default_block_size;
-		m_have.resize(m_files->num_pieces() * m_blocks_per_piece, m_state.seed);
+		m_have.resize(m_files->num_pieces() * m_blocks_per_piece, m_state.files == existing_files_mode::full_valid);
 		m_pad_bytes = compute_pad_bytes(fs);
+
+		if (m_state.files == existing_files_mode::partial_valid)
+		{
+			// we have the first half of the blocks
+			for (std::size_t i = 0; i < m_have.size() / 2u; ++i)
+				m_have.set_bit(i);
+		}
 
 		return lt::storage_holder(lt::storage_index_t{0}, *this);
 	}
@@ -309,15 +351,18 @@ struct test_disk_io final : lt::disk_interface
 		TORRENT_ASSERT((r.start % lt::default_block_size) == 0);
 		TORRENT_ASSERT((r.length <= lt::default_block_size));
 
-		// this block should have been written
-		TORRENT_ASSERT(m_have.get_bit(block_index(r)));
-
-		auto const seek_time = disk_seek(std::int64_t(static_cast<int>(r.piece)) * m_files->piece_length() + r.start
-			, lt::default_block_size);
+		auto const seek_time = disk_seek(r.piece, r.start, lt::default_block_size);
 
 		queue_event(seek_time + m_state.read_time, [this,r, h=std::move(h)] () mutable {
 			lt::disk_buffer_holder buf(*this, new char[lt::default_block_size], r.length);
-			generate_block(buf.data(), r, pads_in_req(m_pad_bytes, r, m_files->piece_size(r.piece)));
+
+			if (m_have.get_bit(block_index(r)))
+			{
+				if (m_state.corrupt_data_in-- <= 0)
+					lt::aux::random_bytes(buf);
+				else
+					generate_block(buf.data(), r, pads_in_req(m_pad_bytes, r, m_files->piece_size(r.piece)));
+			}
 
 			post(m_ioc, [h=std::move(h), b=std::move(buf)] () mutable { h(std::move(b), lt::storage_error{}); });
 		});
@@ -352,8 +397,7 @@ struct test_disk_io final : lt::disk_interface
 
 		bool const valid = validate_block(*m_files, buf, r);
 
-		auto const seek_time = disk_seek(std::int64_t(static_cast<int>(r.piece)) * m_files->piece_length() + r.start
-			, lt::default_block_size);
+		auto const seek_time = disk_seek(r.piece, r.start, lt::default_block_size);
 
 		queue_event(seek_time + m_state.write_time, [this,valid,r,h=std::move(handler)] () mutable {
 
@@ -387,8 +431,7 @@ struct test_disk_io final : lt::disk_interface
 	{
 		TORRENT_ASSERT(m_files);
 
-		auto const seek_time = disk_seek(std::int64_t(static_cast<int>(piece)) * m_files->piece_length()
-			, m_blocks_per_piece * lt::default_block_size);
+		auto const seek_time = disk_seek(piece, 0, m_blocks_per_piece * lt::default_block_size);
 
 		auto const delay = seek_time
 			+ m_state.read_time * m_blocks_per_piece
@@ -405,8 +448,15 @@ struct test_disk_io final : lt::disk_interface
 			{
 				if (!m_have.get_bit(block_idx + i))
 				{
-					// If we're missing a block, return an invalida hash
-					post(m_ioc, [h=std::move(h), piece]{ h(piece, lt::sha1_hash{}, lt::storage_error{}); });
+					lt::sha1_hash ph{};
+					if (m_state.files == existing_files_mode::full_invalid)
+					{
+						for (auto& h : block_hashes)
+							h = rand_sha256();
+						ph = rand_sha1();
+					}
+					// If we're missing a block, return an invalid hash
+					post(m_ioc, [h=std::move(h), piece, ph]{ h(piece, ph, lt::storage_error{}); });
 					return;
 				}
 			}
@@ -426,21 +476,22 @@ struct test_disk_io final : lt::disk_interface
 	{
 		TORRENT_ASSERT(m_files);
 
-		auto const seek_time = disk_seek(std::int64_t(static_cast<int>(piece)) * m_files->piece_length() + offset
-			, m_blocks_per_piece * lt::default_block_size);
+		auto const seek_time = disk_seek(piece, offset, m_blocks_per_piece * lt::default_block_size);
 
 		auto const delay = seek_time + m_state.hash_time + m_state.read_time;
 		queue_event(delay, [this, piece, offset, h=std::move(handler)] () mutable {
 			int const block_idx = piece * m_blocks_per_piece + offset / lt::default_block_size;
+			lt::sha256_hash hash;
 			if (!m_have.get_bit(block_idx))
 			{
-				post(m_ioc, [h=std::move(h),piece] { h(piece, lt::sha256_hash{}, lt::storage_error{}); });
+				if (m_state.files == existing_files_mode::full_invalid)
+					hash = rand_sha256();
 			}
 			else
 			{
-				lt::sha256_hash const hash = generate_block_hash(piece, offset);
-				post(m_ioc, [h=std::move(h),piece, hash] { h(piece, hash, lt::storage_error{}); });
+				hash = generate_block_hash(piece, offset);
 			}
+			post(m_ioc, [h=std::move(h),piece, hash] { h(piece, hash, lt::storage_error{}); });
 		});
 	}
 
@@ -477,9 +528,13 @@ struct test_disk_io final : lt::disk_interface
 		, std::function<void(lt::status_t, lt::storage_error const&)> handler) override
 	{
 		TORRENT_ASSERT(m_files);
-		auto const ret = (!m_state.seed || (p->flags & lt::torrent_flags::seed_mode))
-			? lt::status_t::no_error
-			: lt::status_t::need_full_check;
+
+		auto ret = lt::status_t::need_full_check;
+		if (p && p->flags & lt::torrent_flags::seed_mode)
+			ret = lt::status_t::no_error;
+		else if (m_state.files == existing_files_mode::no_files)
+			ret = lt::status_t::no_error;
+
 		queue_event(lt::microseconds(1), [this,ret,h=std::move(handler)] () mutable {
 			post(m_ioc, [ret,h=std::move(h)] { h(ret, lt::storage_error()); });
 		});
@@ -534,8 +589,9 @@ struct test_disk_io final : lt::disk_interface
 
 private:
 
-	lt::time_duration disk_seek(std::int64_t const offset, int const size = lt::default_block_size)
+	lt::time_duration disk_seek(lt::piece_index_t const piece, int start, int const size = lt::default_block_size)
 	{
+		std::int64_t const offset = std::int64_t(static_cast<int>(piece)) * m_files->piece_length() + start;
 		return (std::exchange(m_last_disk_offset, offset + size) == offset)
 			? lt::milliseconds(0) : m_state.seek_time;
 	}
@@ -616,7 +672,7 @@ private:
 	int m_write_queue = 0;
 	bool m_exceeded_max_size = false;
 
-	// events that is supposed to trigger in the future are put in this queue
+	// events that are supposed to trigger in the future are put in this queue
 	std::deque<std::pair<lt::time_point, std::function<void()>>> m_event_queue;
 	lt::deadline_timer m_timer;
 

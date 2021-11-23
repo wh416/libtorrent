@@ -87,7 +87,7 @@ void test_running_torrent(std::shared_ptr<torrent_info> info, std::int64_t file_
 {
 	settings_pack pack = settings();
 	pack.set_int(settings_pack::alert_mask, alert_category::piece_progress | alert_category::storage);
-	pack.set_str(settings_pack::listen_interfaces, "0.0.0.0:48130");
+	pack.set_str(settings_pack::listen_interfaces, test_listen_interface());
 	pack.set_int(settings_pack::max_retry_port_bind, 10);
 	lt::session ses(pack);
 
@@ -244,7 +244,7 @@ TORRENT_TEST(total_wanted)
 
 	settings_pack pack = settings();
 	pack.set_int(settings_pack::alert_mask, alert_category::storage);
-	pack.set_str(settings_pack::listen_interfaces, "0.0.0.0:48130");
+	pack.set_str(settings_pack::listen_interfaces, test_listen_interface());
 	pack.set_int(settings_pack::max_retry_port_bind, 10);
 	lt::session ses(pack);
 
@@ -283,7 +283,7 @@ TORRENT_TEST(added_peers)
 	auto info = std::make_shared<torrent_info>(tmp, from_span);
 
 	settings_pack pack = settings();
-	pack.set_str(settings_pack::listen_interfaces, "0.0.0.0:48130");
+	pack.set_str(settings_pack::listen_interfaces, test_listen_interface());
 	pack.set_int(settings_pack::max_retry_port_bind, 10);
 	lt::session ses(pack);
 
@@ -562,7 +562,7 @@ TORRENT_TEST(torrent_status)
 
 namespace {
 
-void test_queue(add_torrent_params)
+void test_queue(add_torrent_params const& atp)
 {
 	lt::settings_pack pack = settings();
 	// we're not testing the hash check, just accept the data we write
@@ -582,7 +582,7 @@ void test_queue(add_torrent_params)
 		std::vector<char> buf;
 		bencode(std::back_inserter(buf), t.generate());
 		auto ti = std::make_shared<torrent_info>(buf, from_span);
-		add_torrent_params p;
+		add_torrent_params p = atp;
 		p.ti = ti;
 		p.save_path = ".";
 		torrents.push_back(ses.add_torrent(std::move(p)));

@@ -52,7 +52,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #elif TORRENT_USE_CRYPTOAPI
 #include "libtorrent/aux_/win_crypto_provider.hpp"
 
-#elif defined TORRENT_USE_LIBCRYPTO
+#elif defined TORRENT_USE_LIBCRYPTO && !defined TORRENT_USE_WOLFSSL
 
 #include "libtorrent/aux_/disable_warnings_push.hpp"
 extern "C" {
@@ -173,6 +173,7 @@ namespace aux {
 
 	std::uint32_t random(std::uint32_t const max)
 	{
+		if (max == 0) return 0;
 #ifdef BOOST_NO_CXX11_THREAD_LOCAL
 		std::lock_guard<std::mutex> l(rng_mutex);
 #endif

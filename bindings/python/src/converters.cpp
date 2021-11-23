@@ -70,7 +70,7 @@ struct tuple_to_endpoint
 
         object o(borrowed(x));
         data->convertible = new (storage) T(lt::make_address(
-           extract<std::string>(o[0])), extract<std::uint16_t>(o[1]));
+           static_cast<std::string>(extract<std::string>(o[0]))), extract<std::uint16_t>(o[1]));
     }
 };
 
@@ -549,4 +549,5 @@ void bind_converters()
     to_bitfield_flag<lt::reannounce_flags_t>();
     to_string_view();
     to_bitfield_flag<lt::session_flags_t>();
+    to_bitfield_flag<lt::file_progress_flags_t>();
 }

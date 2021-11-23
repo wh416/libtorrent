@@ -309,7 +309,7 @@ rule building ( properties * )
 	if <toolset>msvc in $(properties) || <toolset>intel-win in $(properties)
 	{
 		# allow larger .obj files (with more sections)
-		result += <cflags>/bigobj ;
+		result += <cxxflags>/bigobj ;
 	}
 
 	if <toolset>gcc in $(properties) && <target-os>windows in $(properties)
@@ -394,11 +394,11 @@ rule openssl-lib-path ( properties * )
 	}
 	else if <target-os>windows in $(properties) && $(OPENSSL_LIB) = ""
 	{
-		# on windows, assume openssl is installed to c:\OpenSSL-Win32
-		if <address-model>64 in $(properties)
-		{ OPENSSL_LIB = c:\\OpenSSL-Win64\\lib ; }
-		else
-		{ OPENSSL_LIB = c:\\OpenSSL-Win32\\lib ; }
+		# the de-facto windows installer is https://slproweb.com/products/Win32OpenSSL.html, which installs to c:\Program Files\OpenSSL-Win{32,64}.
+		# chocolatey appears to use this installer.
+		local address_model = [ feature.get-values <address-model> : $(properties) ] ;
+		OPENSSL_LIB += "C:/Program Files/OpenSSL-Win$(address_model)/lib" ;
+		OPENSSL_LIB += "C:/Program Files (x86)/OpenSSL-Win$(address_model)/lib" ;
 	}
 
 	local result ;
@@ -421,11 +421,11 @@ rule openssl-include-path ( properties * )
 	}
 	else if <target-os>windows in $(properties) && $(OPENSSL_INCLUDE) = ""
 	{
-		# on windows, assume openssl is installed to c:\OpenSSL-Win32
-		if <address-model>64 in $(properties)
-		{ OPENSSL_INCLUDE = c:\\OpenSSL-Win64\\include ; }
-		else
-		{ OPENSSL_INCLUDE = c:\\OpenSSL-Win32\\include ; }
+		# the de-facto windows installer is https://slproweb.com/products/Win32OpenSSL.html, which installs to c:\Program Files\OpenSSL-Win{32,64}.
+		# chocolatey appears to use this installer.
+		local address_model = [ feature.get-values <address-model> : $(properties) ] ;
+		OPENSSL_INCLUDE += "C:/Program Files/OpenSSL-Win$(address_model)/include" ;
+		OPENSSL_INCLUDE += "C:/Program Files (x86)/OpenSSL-Win$(address_model)/include" ;
 	}
 
 	local result ;
@@ -585,7 +585,7 @@ feature.compose <encryption>off : <define>TORRENT_DISABLE_ENCRYPTION ;
 feature mutable-torrents : on off : composite propagated link-incompatible ;
 feature.compose <mutable-torrents>off : <define>TORRENT_DISABLE_MUTABLE_TORRENTS ;
 
-feature crypto : built-in openssl wolfssl gnutls libcrypto gcrypt : composite propagated ;
+feature crypto : openssl built-in wolfssl gnutls libcrypto gcrypt : composite propagated ;
 feature.compose <crypto>openssl
 	: <define>TORRENT_USE_LIBCRYPTO
 	<define>TORRENT_USE_OPENSSL
@@ -971,8 +971,6 @@ rule generate-pkg-config ( properties * )
 	local props = [ $(t).generate [ property-set.create $(properties) ] ] ;
 	local libname = [ $(props[2]).name ] ;
 	props = $(props[1]) ;
-
-	local FULL_VERSION = 1.2.14 ;
 
 	p = [ install-paths $(properties) ] ;
 
